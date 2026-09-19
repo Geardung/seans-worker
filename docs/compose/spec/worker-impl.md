@@ -1,16 +1,23 @@
 ---
 feature: worker-impl
-status: designed
+status: delivered
 updated: 2026-09-20
 branch: feat/worker-impl
-commits: (pending)
+commits: 5c32eed..4247ddb
 ---
 
 # Worker Implementation
 
 ## Report
 
-(Empty — not yet delivered)
+**What was built** — A Go 1.23 worker for the Seans media service that pulls tasks from a backend API, downloads torrents via qBittorrent Web API v2, and uploads files to S3 via rclone subprocess. The worker implements a full state machine (preparing→downloading→uploading→done) with stall detection, metadata timeouts, quota checks, file selection with suffix fallback, and graceful shutdown with drain support. A mock backend server enables development without real backend/S3 infrastructure.
+
+**Verification** — `go build ./...` compiles clean. `go vet ./...` passes. `go test ./... -v -count=1` runs 27 tests across 3 packages (backend, qbit, engine) — all PASS.
+
+**Journey log**:
+- `syscall.Statfs` is Linux-only; split into build-tagged files (`disk.go` + `disk_windows.go`)
+- qBittorrent test helper initially used custom logger type instead of `*slog.Logger`; fixed to use real slog with io.Discard
+- Task runner uses concrete types (not interfaces) for simplicity; mock types are documented in tests for future interface extraction
 
 ## [S1] Problem
 
@@ -74,14 +81,14 @@ When MOCK_S3=true, rclone uses local filesystem instead of S3 remote.
 - Web UI for worker monitoring
 
 ## Tasks
-- [ ] T1: Go module + config — acceptance: `go build ./cmd/agent` compiles, config parses from env (covers: S2)
-- [ ] T2: Backend HTTP client — acceptance: register/claim/heartbeat/complete/fail with auth, 401 re-register, retry logic (covers: S2)
-- [ ] T3: qBittorrent client — acceptance: login, add torrent, poll progress, set priorities, delete torrent (covers: S2)
-- [ ] T4: rclone uploader — acceptance: generate rclone.conf, execute rclone move with retry, mock S3 support (covers: S2)
-- [ ] T5: Task state machine — acceptance: preparing→downloading→uploading→done with all error paths (covers: S2)
-- [ ] T6: Engine (claim loop, heartbeat, graceful shutdown) — acceptance: claim loop, heartbeat goroutine, SIGTERM handling (covers: S2)
-- [ ] T7: Agent entrypoint — acceptance: `make build` produces working binary, logs version (covers: S2)
-- [ ] T8: Mock backend — acceptance: serves one task, prints heartbeats/complete/fail (covers: S2)
-- [ ] T9: Docker (Dockerfile + compose) — acceptance: `docker compose up` starts qbit + agent (covers: S2)
-- [ ] T10: Tests — acceptance: qbit/client_test, engine/task_test, backend/client_test all pass (covers: S2)
-- [ ] T11: .env.example + Makefile + README — acceptance: all env vars documented, README has 3-command deploy guide (covers: S2)
+- [x] T1: Go module + config — acceptance: `go build ./cmd/agent` compiles, config parses from env (covers: S2)
+- [x] T2: Backend HTTP client — acceptance: register/claim/heartbeat/complete/fail with auth, 401 re-register, retry logic (covers: S2)
+- [x] T3: qBittorrent client — acceptance: login, add torrent, poll progress, set priorities, delete torrent (covers: S2)
+- [x] T4: rclone uploader — acceptance: generate rclone.conf, execute rclone move with retry, mock S3 support (covers: S2)
+- [x] T5: Task state machine — acceptance: preparing→downloading→uploading→done with all error paths (covers: S2)
+- [x] T6: Engine (claim loop, heartbeat, graceful shutdown) — acceptance: claim loop, heartbeat goroutine, SIGTERM handling (covers: S2)
+- [x] T7: Agent entrypoint — acceptance: `make build` produces working binary, logs version (covers: S2)
+- [x] T8: Mock backend — acceptance: serves one task, prints heartbeats/complete/fail (covers: S2)
+- [x] T9: Docker (Dockerfile + compose) — acceptance: `docker compose up` starts qbit + agent (covers: S2)
+- [x] T10: Tests — acceptance: qbit/client_test, engine/task_test, backend/client_test all pass (covers: S2)
+- [x] T11: .env.example + Makefile + README — acceptance: all env vars documented, README has 3-command deploy guide (covers: S2)
