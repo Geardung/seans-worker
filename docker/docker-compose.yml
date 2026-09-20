@@ -8,6 +8,7 @@ services:
       - TZ=Europe/Moscow
       - WEBUI_PORT=8080
       - TORRENTING_PORT=6881
+      - WEBUI_PASSWORD=seansWorker2024
     ports:
       - "6881:6881"
       - "6881:6881/udp"

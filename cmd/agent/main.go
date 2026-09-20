@@ -38,10 +38,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Login to qBittorrent
+	// Login to qBittorrent (retry until ready)
 	ctx := context.Background()
-	if err := qc.Login(ctx); err != nil {
-		logger.Error("qbit login error", "error", err)
+	qbitReady := false
+	for i := 0; i < 30; i++ {
+		if err := qc.Login(ctx); err != nil {
+			logger.Warn("qbit login failed, retrying in 2s", "error", err, "attempt", i+1)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		qbitReady = true
+		break
+	}
+	if !qbitReady {
+		logger.Error("qbit login failed after 30 attempts")
 		os.Exit(1)
 	}
 
