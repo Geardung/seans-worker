@@ -349,7 +349,7 @@ func (tr *taskRunner) download(ctx context.Context) error {
 				return &TaskError{Reason: "stalled: no download progress", Permanent: true}
 			}
 
-			if torrent.Progress >= 1.0 && !isActiveState(torrent.State) {
+			if torrent.Progress >= 1.0 && !isActiveState(string(torrent.State)) {
 				tr.state.ProgressPct = 100
 				tr.state.DownloadSeconds = int(time.Since(tr.state.DownloadStart).Seconds())
 				tr.logger.Info("download complete", "seconds", tr.state.DownloadSeconds)

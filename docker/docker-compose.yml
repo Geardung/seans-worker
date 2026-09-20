@@ -1,6 +1,6 @@
 services:
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:latest
+    image: lscr.io/linuxserver/qbittorrent:5.2.0
     container_name: seans-worker-qbit
     environment:
       - PUID=1000
@@ -8,7 +8,6 @@ services:
       - TZ=Europe/Moscow
       - WEBUI_PORT=8080
       - TORRENTING_PORT=6881
-      - WEBUI_PASSWORD=seansWorker2024
     ports:
       - "6881:6881"
       - "6881:6881/udp"

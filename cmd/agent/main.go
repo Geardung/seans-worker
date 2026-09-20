@@ -31,29 +31,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Init qBittorrent client
-	qc, err := qbit.New(cfg.QBitURL, cfg.QBitUser, cfg.QBitPass, logger)
+	// Init qBittorrent client (API key auth, no login needed)
+	qc, err := qbit.New(cfg.QBitURL, cfg.QBitAPIKey, logger)
 	if err != nil {
 		logger.Error("qbit client error", "error", err)
 		os.Exit(1)
 	}
-
-	// Login to qBittorrent (retry until ready)
 	ctx := context.Background()
-	qbitReady := false
-	for i := 0; i < 30; i++ {
-		if err := qc.Login(ctx); err != nil {
-			logger.Warn("qbit login failed, retrying in 2s", "error", err, "attempt", i+1)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		qbitReady = true
-		break
-	}
-	if !qbitReady {
-		logger.Error("qbit login failed after 30 attempts")
-		os.Exit(1)
-	}
 
 	// Init rclone uploader
 	uploader, err := s3uploader.New(cfg.StateDir, cfg.S3AccessKey, cfg.S3SecretKey, cfg.MockS3, logger)

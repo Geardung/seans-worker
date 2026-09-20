@@ -22,45 +22,27 @@ func newTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return srv
 }
 
-func TestLogin(t *testing.T) {
+func TestBearerAuth(t *testing.T) {
+	var gotHeader string
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			t.Errorf("parse form: %v", err)
-		}
-		if r.FormValue("username") != "admin" || r.FormValue("password") != "secret" {
-			http.Error(w, "Unauthorized", http.StatusForbidden)
-			return
-		}
-		w.Write([]byte("Ok."))
+	mux.HandleFunc("GET /api/v2/torrents/info", func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]"))
 	})
 
 	srv := newTestServer(t, mux)
-	c, err := New(srv.URL, "admin", "secret", testLogger())
+	c, err := New(srv.URL, "qbt_testkey123456789012345678", testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := c.Login(context.Background()); err != nil {
-		t.Fatalf("login failed: %v", err)
-	}
-}
-
-func TestLogin_BadCredentials(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		w.Write([]byte("Fails."))
-	})
-
-	srv := newTestServer(t, mux)
-	c, err := New(srv.URL, "admin", "wrong", testLogger())
+	_, err = c.GetTorrents(context.Background(), "seans")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("get torrents: %v", err)
 	}
-
-	if err := c.Login(context.Background()); err == nil {
-		t.Fatal("expected error for bad credentials")
+	if gotHeader != "Bearer qbt_testkey123456789012345678" {
+		t.Errorf("expected Bearer auth header, got %q", gotHeader)
 	}
 }
 
@@ -80,7 +62,7 @@ func TestAddTorrentMagnet(t *testing.T) {
 	})
 
 	srv := newTestServer(t, mux)
-	c, err := New(srv.URL, "admin", "pass", testLogger())
+	c, err := New(srv.URL, "test-api-key", testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +94,7 @@ func TestAddTorrentFile(t *testing.T) {
 	})
 
 	srv := newTestServer(t, mux)
-	c, err := New(srv.URL, "admin", "pass", testLogger())
+	c, err := New(srv.URL, "test-api-key", testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,11 +110,11 @@ func TestAddTorrentFile(t *testing.T) {
 func TestAddTorrent_FailsResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v2/torrents/add", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Fails."))
+		http.Error(w, "Fails.", http.StatusInternalServerError)
 	})
 
 	srv := newTestServer(t, mux)
-	c, err := New(srv.URL, "admin", "pass", testLogger())
+	c, err := New(srv.URL, "test-api-key", testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +139,7 @@ func TestGetTorrents(t *testing.T) {
 	})
 
 	srv := newTestServer(t, mux)
-	c, err := New(srv.URL, "admin", "pass", testLogger())
+	c, err := New(srv.URL, "test-api-key", testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +171,7 @@ func TestGetFiles(t *testing.T) {
 	})
 
 	srv := newTestServer(t, mux)
-	c, err := New(srv.URL, "admin", "pass", testLogger())
+	c, err := New(srv.URL, "test-api-key", testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +206,7 @@ func TestSetFilePriority(t *testing.T) {
 	})
 
 	srv := newTestServer(t, mux)
-	c, err := New(srv.URL, "admin", "pass", testLogger())
+	c, err := New(srv.URL, "test-api-key", testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +236,7 @@ func TestDeleteTorrent(t *testing.T) {
 	})
 
 	srv := newTestServer(t, mux)
-	c, err := New(srv.URL, "admin", "pass", testLogger())
+	c, err := New(srv.URL, "test-api-key", testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +259,7 @@ func TestGetTorrentBySavePath(t *testing.T) {
 	})
 
 	srv := newTestServer(t, mux)
-	c, err := New(srv.URL, "admin", "pass", testLogger())
+	c, err := New(srv.URL, "test-api-key", testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}

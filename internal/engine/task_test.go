@@ -212,7 +212,7 @@ func TestTaskError(t *testing.T) {
 func TestConfigLoad_Defaults(t *testing.T) {
 	t.Setenv("BACKEND_URL", "http://localhost:9999")
 	t.Setenv("WORKER_REGISTER_TOKEN", "token")
-	t.Setenv("QBIT_PASS", "pass")
+	t.Setenv("QBIT_API_KEY", "qbt_testkey123")
 	t.Setenv("MOCK_S3", "true")
 
 	cfg, err := config.Load()
@@ -237,7 +237,7 @@ func TestConfigLoad_MissingRequired(t *testing.T) {
 	// Clear all env
 	t.Setenv("BACKEND_URL", "")
 	t.Setenv("WORKER_REGISTER_TOKEN", "")
-	t.Setenv("QBIT_PASS", "")
+	t.Setenv("QBIT_API_KEY", "")
 
 	_, err := config.Load()
 	if err == nil {
