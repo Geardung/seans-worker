@@ -17,6 +17,20 @@ services:
     restart: unless-stopped
     mem_limit: 1g
 
+  caddy:
+    image: caddy:2-alpine
+    container_name: seans-worker-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+    depends_on:
+      - qbittorrent
+
   agent:
     build:
       context: ..
@@ -33,3 +47,5 @@ services:
 
 volumes:
   agent-state:
+  caddy-data:
+  caddy-config:
