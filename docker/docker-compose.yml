@@ -36,7 +36,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: seans-worker-agent
-    env_file: ../.env
+    env_file: ./.env
     volumes:
       - ${STAGING_HOST_DIR:-/mnt/staging}:/staging
       - agent-state:/state

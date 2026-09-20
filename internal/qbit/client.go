@@ -84,7 +84,10 @@ func (c *Client) Login(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 || strings.TrimSpace(string(body)) != "Ok." {
+	trimmed := strings.TrimSpace(string(body))
+	if resp.StatusCode == 204 || (resp.StatusCode == 200 && trimmed == "Ok.") {
+		// success
+	} else {
 		return fmt.Errorf("login failed: status=%d body=%s", resp.StatusCode, string(body))
 	}
 
