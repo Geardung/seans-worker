@@ -1,6 +1,7 @@
 .PHONY: build test lint vet clean compose-up compose-down mock
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMPOSE ?= $(shell command -v docker-compose 2>/dev/null || echo "docker compose")
 
 build:
 	CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=$(VERSION)" -o bin/agent ./cmd/agent
@@ -18,10 +19,10 @@ clean:
 	rm -rf bin/
 
 compose-up:
-	docker compose -f docker/docker-compose.yml up -d --build
+	$(COMPOSE) -f docker/docker-compose.yml up -d --build
 
 compose-down:
-	docker compose -f docker/docker-compose.yml down
+	$(COMPOSE) -f docker/docker-compose.yml down
 
 mock: build
 	@echo "Starting mock backend on :9999..."
