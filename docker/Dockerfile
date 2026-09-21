@@ -13,5 +13,4 @@ FROM alpine:3.20
 RUN apk add --no-cache rclone ca-certificates
 COPY --from=build /out/agent /usr/local/bin/agent
 COPY --from=build /out/mockbackend /usr/local/bin/mockbackend
-USER nobody
 ENTRYPOINT ["agent"]
