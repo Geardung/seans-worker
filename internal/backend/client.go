@@ -26,12 +26,6 @@ type ClaimResponse struct {
 	Task *Task `json:"task"`
 }
 
-type RegisterResponse struct {
-	WorkerID             string `json:"worker_id"`
-	WorkerToken          string `json:"worker_token"`
-	HeartbeatIntervalSec int    `json:"heartbeat_interval_sec"`
-}
-
 type FileInfo struct {
 	S3Key  string `json:"s3_key"`
 	Size   int64  `json:"size"`
@@ -94,37 +88,45 @@ func (c *Client) HeartbeatInterval() time.Duration {
 // Register registers the worker with the backend. Idempotent — called at startup.
 func (c *Client) Register(ctx context.Context, hostname, version string, maxConcurrent int, diskFreeGB float64) (time.Duration, error) {
 	body := map[string]any{
-		"hostname":               hostname,
-		"version":                version,
-		"max_concurrent_tasks":   maxConcurrent,
-		"disk_free_gb":           diskFreeGB,
+		"hostname":             hostname,
+		"version":              version,
+		"max_concurrent_tasks": maxConcurrent,
+		"disk_free_gb":         diskFreeGB,
 	}
 
-	var resp RegisterResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/v1/workers/register", c.regToken, body, &resp); err != nil {
+	var resp map[string]any
+	if err := c.doJSON(ctx, http.MethodPost, "/api/worker/register", c.regToken, body, &resp); err != nil {
 		return 0, fmt.Errorf("register: %w", err)
 	}
 
 	c.mu.Lock()
-	c.workerID = resp.WorkerID
-	c.workerToken = resp.WorkerToken
+	if wid, ok := resp["worker_id"].(string); ok {
+		c.workerID = wid
+	}
+	if wtok, ok := resp["worker_token"].(string); ok && wtok != "" {
+		c.workerToken = wtok
+	} else {
+		c.workerToken = c.regToken
+	}
 	c.reRegistered = false
 	c.mu.Unlock()
 
-	interval := time.Duration(resp.HeartbeatIntervalSec) * time.Second
-	if interval == 0 {
-		interval = 60 * time.Second
+	interval := 60 * time.Second
+	if hbSec, ok := resp["heartbeat_interval_sec"].(float64); ok && hbSec > 0 {
+		interval = time.Duration(hbSec) * time.Second
 	}
-	c.logger.Info("registered with backend", "worker_id", resp.WorkerID, "heartbeat_sec", int(interval.Seconds()))
+	c.logger.Info("registered with backend",
+		"worker_id", c.WorkerID(),
+		"has_worker_token", c.workerToken != c.regToken,
+		"heartbeat_sec", int(interval.Seconds()),
+	)
 	return interval, nil
 }
 
 // Claim requests the next task from the backend.
 func (c *Client) Claim(ctx context.Context) (*Task, error) {
-	body := map[string]any{"max_tasks": 1}
-
 	var resp ClaimResponse
-	if err := c.doAuthJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workers/%s/claim", c.WorkerID()), body, &resp); err != nil {
+	if err := c.doAuthJSON(ctx, http.MethodPost, "/api/worker/claim", nil, &resp); err != nil {
 		return nil, fmt.Errorf("claim: %w", err)
 	}
 	return resp.Task, nil
@@ -133,10 +135,11 @@ func (c *Client) Claim(ctx context.Context) (*Task, error) {
 // Complete reports task success.
 func (c *Client) Complete(ctx context.Context, taskID string, files []FileInfo, stats TaskStats) error {
 	body := map[string]any{
-		"files": files,
-		"stats": stats,
+		"task_id": taskID,
+		"files":   files,
+		"stats":   stats,
 	}
-	if err := c.doAuthJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/tasks/%s/complete", taskID), body, nil); err != nil {
+	if err := c.doAuthJSON(ctx, http.MethodPost, "/api/worker/complete", body, nil); err != nil {
 		return fmt.Errorf("complete %s: %w", taskID, err)
 	}
 	return nil
@@ -145,10 +148,11 @@ func (c *Client) Complete(ctx context.Context, taskID string, files []FileInfo, 
 // Fail reports task failure.
 func (c *Client) Fail(ctx context.Context, taskID, reason string, permanent bool) error {
 	body := map[string]any{
+		"task_id":   taskID,
 		"reason":    reason,
 		"permanent": permanent,
 	}
-	if err := c.doAuthJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/tasks/%s/fail", taskID), body, nil); err != nil {
+	if err := c.doAuthJSON(ctx, http.MethodPost, "/api/worker/fail", body, nil); err != nil {
 		return fmt.Errorf("fail %s: %w", taskID, err)
 	}
 	return nil
@@ -160,13 +164,13 @@ func (c *Client) Heartbeat(ctx context.Context, tasks []HeartbeatTask, diskFreeG
 		Tasks:      tasks,
 		DiskFreeGB: diskFreeGB,
 	}
-	if err := c.doAuthJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workers/%s/heartbeat", c.WorkerID()), body, nil); err != nil {
+	if err := c.doAuthJSON(ctx, http.MethodPost, "/api/worker/heartbeat", body, nil); err != nil {
 		return fmt.Errorf("heartbeat: %w", err)
 	}
 	return nil
 }
 
-func (c *Client) doJSON(ctx context.Context, method, path, auth string, body any, result any) error {
+func (c *Client) doJSON(ctx context.Context, method, path, token string, body any, result any) error {
 	var reqBody io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -181,8 +185,8 @@ func (c *Client) doJSON(ctx context.Context, method, path, auth string, body any
 		return fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if auth != "" {
-		req.Header.Set("Authorization", "Bearer "+auth)
+	if token != "" {
+		req.Header.Set("X-Worker-Token", token)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -192,10 +196,11 @@ func (c *Client) doJSON(ctx context.Context, method, path, auth string, body any
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 401 {
-		return c.handle401(ctx, method, path, auth, body, result)
+		return c.handle401()
 	}
 	if resp.StatusCode >= 500 {
-		return fmt.Errorf("server error: %d", resp.StatusCode)
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server error %d: %s", resp.StatusCode, string(respBody))
 	}
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -220,20 +225,17 @@ func (c *Client) doAuthJSON(ctx context.Context, method, path string, body any, 
 	return c.doJSON(ctx, method, path, token, body, result)
 }
 
-func (c *Client) handle401(ctx context.Context, method, path, auth string, body any, result any) error {
+func (c *Client) handle401() error {
 	c.mu.Lock()
-	alreadyReRegistered := c.reRegistered
-	c.mu.Unlock()
+	defer c.mu.Unlock()
 
-	if alreadyReRegistered {
+	if c.reRegistered {
 		return fmt.Errorf("401 after re-register, backing off")
 	}
 
-	c.logger.Warn("received 401, attempting re-registration")
-	c.mu.Lock()
+	c.logger.Warn("received 401, clearing token for re-registration")
 	c.workerToken = ""
 	c.reRegistered = true
-	c.mu.Unlock()
 
 	return fmt.Errorf("401: need re-registration")
 }

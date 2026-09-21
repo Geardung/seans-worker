@@ -25,22 +25,27 @@ func newTestClient(t *testing.T, handler http.Handler) (*Client, *httptest.Serve
 	return c, srv
 }
 
+func assertWorkerToken(t *testing.T, r *http.Request, expected string) {
+	t.Helper()
+	got := r.Header.Get("X-Worker-Token")
+	if got != expected {
+		t.Errorf("expected X-Worker-Token %q, got %q", expected, got)
+	}
+}
+
 func TestRegister_HappyPath(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/workers/register", func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if auth != "Bearer reg-token" {
-			t.Errorf("expected Bearer reg-token, got %s", auth)
-		}
+	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
+		assertWorkerToken(t, r, "reg-token")
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
 		if body["hostname"] != "test-host" {
 			t.Errorf("expected hostname test-host, got %v", body["hostname"])
 		}
 		respondJSON(w, map[string]any{
-			"worker_id":               "w_abc",
-			"worker_token":            "jwt-token-123",
-			"heartbeat_interval_sec":  30,
+			"worker_id":              "w_abc",
+			"worker_token":           "jwt-token-123",
+			"heartbeat_interval_sec": 30,
 		})
 	})
 
@@ -60,20 +65,34 @@ func TestRegister_HappyPath(t *testing.T) {
 	}
 }
 
+func TestRegister_EmptyResponse_UsesRegToken(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
+		respondJSON(w, map[string]any{})
+	})
+
+	c, _ := newTestClient(t, mux)
+	interval, err := c.Register(context.Background(), "h", "v", 1, 100)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if interval != 60*time.Second {
+		t.Errorf("expected default 60s interval, got %v", interval)
+	}
+	if !c.IsRegistered() {
+		t.Error("expected client to be registered (using regToken fallback)")
+	}
+}
+
 func TestClaim_HappyPath(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/workers/register", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, map[string]any{
-			"worker_id":              "w_abc",
-			"worker_token":           "jwt-token",
-			"heartbeat_interval_sec": 60,
+			"worker_token": "jwt-token",
 		})
 	})
-	mux.HandleFunc("POST /v1/workers/w_abc/claim", func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if auth != "Bearer jwt-token" {
-			t.Errorf("expected Bearer jwt-token, got %s", auth)
-		}
+	mux.HandleFunc("POST /api/worker/claim", func(w http.ResponseWriter, r *http.Request) {
+		assertWorkerToken(t, r, "jwt-token")
 		respondJSON(w, map[string]any{
 			"task": map[string]any{
 				"task_id":       "tsk_001",
@@ -107,14 +126,12 @@ func TestClaim_HappyPath(t *testing.T) {
 
 func TestClaim_NoTask(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/workers/register", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, map[string]any{
-			"worker_id":              "w_abc",
-			"worker_token":           "jwt-token",
-			"heartbeat_interval_sec": 60,
+			"worker_token": "jwt-token",
 		})
 	})
-	mux.HandleFunc("POST /v1/workers/w_abc/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/worker/claim", func(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, map[string]any{"task": nil})
 	})
 
@@ -133,18 +150,13 @@ func TestClaim_NoTask(t *testing.T) {
 func TestComplete_HappyPath(t *testing.T) {
 	var receivedBody map[string]any
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/workers/register", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, map[string]any{
-			"worker_id":              "w_abc",
-			"worker_token":           "jwt-token",
-			"heartbeat_interval_sec": 60,
+			"worker_token": "jwt-token",
 		})
 	})
-	mux.HandleFunc("POST /v1/tasks/tsk_001/complete", func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if auth != "Bearer jwt-token" {
-			t.Errorf("expected Bearer jwt-token, got %s", auth)
-		}
+	mux.HandleFunc("POST /api/worker/complete", func(w http.ResponseWriter, r *http.Request) {
+		assertWorkerToken(t, r, "jwt-token")
 		data, _ := io.ReadAll(r.Body)
 		json.Unmarshal(data, &receivedBody)
 		respondJSON(w, map[string]any{})
@@ -162,19 +174,21 @@ func TestComplete_HappyPath(t *testing.T) {
 	if receivedBody == nil {
 		t.Fatal("expected body to be received")
 	}
+	if receivedBody["task_id"] != "tsk_001" {
+		t.Errorf("expected task_id=tsk_001, got %v", receivedBody["task_id"])
+	}
 }
 
 func TestFail_HappyPath(t *testing.T) {
 	var receivedBody map[string]any
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/workers/register", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, map[string]any{
-			"worker_id":              "w_abc",
-			"worker_token":           "jwt-token",
-			"heartbeat_interval_sec": 60,
+			"worker_token": "jwt-token",
 		})
 	})
-	mux.HandleFunc("POST /v1/tasks/tsk_001/fail", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/worker/fail", func(w http.ResponseWriter, r *http.Request) {
+		assertWorkerToken(t, r, "jwt-token")
 		data, _ := io.ReadAll(r.Body)
 		json.Unmarshal(data, &receivedBody)
 		respondJSON(w, map[string]any{})
@@ -187,6 +201,9 @@ func TestFail_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fail: %v", err)
 	}
+	if receivedBody["task_id"] != "tsk_001" {
+		t.Errorf("expected task_id=tsk_001, got %v", receivedBody["task_id"])
+	}
 	if receivedBody["permanent"] != true {
 		t.Errorf("expected permanent=true, got %v", receivedBody["permanent"])
 	}
@@ -197,14 +214,13 @@ func TestFail_HappyPath(t *testing.T) {
 
 func TestHeartbeat_HappyPath(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/workers/register", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, map[string]any{
-			"worker_id":              "w_abc",
-			"worker_token":           "jwt-token",
-			"heartbeat_interval_sec": 60,
+			"worker_token": "jwt-token",
 		})
 	})
-	mux.HandleFunc("POST /v1/workers/w_abc/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/worker/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		assertWorkerToken(t, r, "jwt-token")
 		var body HeartbeatRequest
 		json.NewDecoder(r.Body).Decode(&body)
 		if len(body.Tasks) != 1 {
@@ -230,14 +246,12 @@ func TestHeartbeat_HappyPath(t *testing.T) {
 
 func Test401_TriggersReRegistrationFlag(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/workers/register", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, map[string]any{
-			"worker_id":              "w_abc",
-			"worker_token":           "jwt-token",
-			"heartbeat_interval_sec": 60,
+			"worker_token": "jwt-token",
 		})
 	})
-	mux.HandleFunc("POST /v1/workers/w_abc/claim", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/worker/claim", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 		w.Write([]byte(`{"detail":"unauthorized"}`))
 	})

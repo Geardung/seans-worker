@@ -12,7 +12,7 @@ services:
       - "6881:6881"
       - "6881:6881/udp"
     volumes:
-      - ./qbit-config:/config
+      - ./docker/qbit-config:/config
       - ${STAGING_HOST_DIR:-/mnt/staging}:/downloads
     restart: unless-stopped
     mem_limit: 1g
@@ -24,7 +24,7 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
     restart: unless-stopped
@@ -33,10 +33,10 @@ services:
 
   agent:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile
     container_name: seans-worker-agent
-    env_file: ../.env
+    env_file: .env
     volumes:
       - ${STAGING_HOST_DIR:-/mnt/staging}:/staging
       - agent-state:/state

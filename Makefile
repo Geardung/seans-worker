@@ -19,10 +19,10 @@ clean:
 	rm -rf bin/
 
 compose-up:
-	$(COMPOSE) -f docker/docker-compose.yml up -d --build
+	$(COMPOSE) up -d --build
 
 compose-down:
-	$(COMPOSE) -f docker/docker-compose.yml down
+	$(COMPOSE) down
 
 mock: build
 	@echo "Starting mock backend on :9999..."

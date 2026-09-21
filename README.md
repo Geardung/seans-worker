@@ -10,28 +10,25 @@ Worker для self-hosted медиасервиса Seans. Скачивает т�
 4. Отправляет heartbeat с прогрессом всех активных задач
 5. Graceful shutdown по SIGTERM/SIGINT
 
-## Быстрый старт (3 команды)
+## Быстрый старт
 
 ```bash
 # 1. Скопировать и заполнить конфиг
 cp .env.example .env
-# Заполнить QBIT_PASS, BACKEND_URL, WORKER_REGISTER_TOKEN
+# Заполнить QBIT_API_KEY, BACKEND_URL, WORKER_REGISTER_TOKEN
 
 # 2. Запустить (docker compose)
 make compose-up
 
 # 3. Проверить логи
-docker compose -f docker/docker-compose.yml logs -f agent
+docker compose logs -f agent
 ```
 
 ### Первый запуск qBittorrent
 
-При первом `make compose-up` qBittorrent генерирует временный пароль.
-Найти его в логах:
-```bash
-docker compose -f docker/docker-compose.yml logs qbittorrent | grep -i password
-```
-Вписать пароль в `.env` как `QBIT_PASS`, затем перезапустить:
+При первом запуске нужно сгенерировать API key в Web UI qBittorrent:
+Settings → Web UI → Authentication → Generate new password/API key.
+Вписать ключ в `.env` как `QBIT_API_KEY`, затем перезапустить:
 ```bash
 make compose-down && make compose-up
 ```
