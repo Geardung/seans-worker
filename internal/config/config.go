@@ -8,9 +8,9 @@ import (
 )
 
 type Config struct {
-	BackendURL          string
-	WorkerRegisterToken string
-	WorkerName          string
+	BackendURL string
+	RegSecret  string
+	WorkerName string
 	QBitURL             string
 	QBitAPIKey          string
 	QBitDownloads       string
@@ -31,9 +31,9 @@ type Config struct {
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		BackendURL:          os.Getenv("BACKEND_URL"),
-		WorkerRegisterToken: os.Getenv("WORKER_REGISTER_TOKEN"),
-		WorkerName:          envOr("WORKER_NAME", hostname()),
+		BackendURL: os.Getenv("BACKEND_URL"),
+		RegSecret:  os.Getenv("WORKER_REG_SECRET"),
+		WorkerName: envOr("WORKER_NAME", hostname()),
 		QBitURL:             envOr("QBIT_URL", "http://qbittorrent:8080"),
 		QBitAPIKey:          os.Getenv("QBIT_API_KEY"),
 		QBitDownloads:       envOr("QBIT_DOWNLOADS", "/downloads"),
@@ -55,8 +55,8 @@ func Load() (*Config, error) {
 	if cfg.BackendURL == "" {
 		return nil, fmt.Errorf("BACKEND_URL is required")
 	}
-	if cfg.WorkerRegisterToken == "" {
-		return nil, fmt.Errorf("WORKER_REGISTER_TOKEN is required")
+	if cfg.RegSecret == "" {
+		return nil, fmt.Errorf("WORKER_REG_SECRET is required")
 	}
 	if cfg.QBitAPIKey == "" {
 		return nil, fmt.Errorf("QBIT_API_KEY is required")

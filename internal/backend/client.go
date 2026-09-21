@@ -12,61 +12,56 @@ import (
 	"time"
 )
 
+// Task represents a claimed task from the backend.
 type Task struct {
 	TaskID      string   `json:"task_id"`
-	TorrentKind string   `json:"torrent_kind"`
-	TorrentData string   `json:"torrent_data"`
-	SelectFiles []string `json:"select_files"`
-	DestPrefix  string   `json:"dest_prefix"`
-	MaxBytes    int64    `json:"max_bytes"`
-	LeaseMinutes int     `json:"lease_minutes"`
+	Magnet      string   `json:"magnet"`
+	MediaTitle  string   `json:"media_title"`
+	FilePaths   []string `json:"file_paths"`
+	UploadSlots []UploadSlot `json:"upload_slots"`
 }
 
-type ClaimResponse struct {
-	Task *Task `json:"task"`
+type UploadSlot struct {
+	Path    string            `json:"path"`
+	S3Key   string            `json:"s3_key"`
+	PutURL  string            `json:"put_url"`
+	Headers map[string]string `json:"headers"`
 }
 
 type FileInfo struct {
-	S3Key  string `json:"s3_key"`
-	Size   int64  `json:"size"`
+	Path     string `json:"path"`
+	S3Key    string `json:"s3_key,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
 }
 
-type TaskStats struct {
-	DownloadSeconds int `json:"download_seconds"`
-	UploadSeconds   int `json:"upload_seconds"`
+type ManifestFile struct {
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"size_bytes"`
 }
 
 type HeartbeatTask struct {
 	TaskID      string  `json:"task_id"`
 	Stage       string  `json:"stage"`
 	ProgressPct float64 `json:"progress_pct"`
-	SpeedMbps   float64 `json:"speed_mbps"`
-	ETAMin      int     `json:"eta_min"`
-	Message     string  `json:"message"`
+	SpeedBps    int64   `json:"speed_bps"`
 }
 
-type HeartbeatRequest struct {
-	Tasks      []HeartbeatTask `json:"tasks"`
-	DiskFreeGB float64         `json:"disk_free_gb"`
-}
-
-// Client talks to the Seans backend API v1.
+// Client talks to the Seans backend API.
 type Client struct {
 	baseURL    string
-	regToken   string
+	regSecret  string
 	httpClient *http.Client
 	logger     *slog.Logger
 
 	mu           sync.Mutex
-	workerID     string
 	workerToken  string
 	reRegistered bool
 }
 
-func New(baseURL, regToken string, logger *slog.Logger) *Client {
+func New(baseURL, regSecret string, logger *slog.Logger) *Client {
 	return &Client{
 		baseURL:  baseURL,
-		regToken: regToken,
+		regSecret: regSecret,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -74,70 +69,125 @@ func New(baseURL, regToken string, logger *slog.Logger) *Client {
 	}
 }
 
-func (c *Client) WorkerID() string {
+// IsRegistered returns true if the client has a valid worker token.
+func (c *Client) IsRegistered() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.workerID
+	return c.workerToken != ""
 }
 
-func (c *Client) HeartbeatInterval() time.Duration {
-	// Default; overridden by register response.
-	return 60 * time.Second
+func (c *Client) workerTokenLocked() string {
+	return c.workerToken
 }
 
-// Register registers the worker with the backend. Idempotent — called at startup.
-func (c *Client) Register(ctx context.Context, hostname, version string, maxConcurrent int, diskFreeGB float64) (time.Duration, error) {
+// Register registers the worker with the backend. Called once at startup.
+func (c *Client) Register(ctx context.Context, name string) error {
 	body := map[string]any{
-		"hostname":             hostname,
-		"version":              version,
-		"max_concurrent_tasks": maxConcurrent,
-		"disk_free_gb":         diskFreeGB,
+		"name":       name,
+		"reg_secret": c.regSecret,
 	}
 
 	var resp map[string]any
-	if err := c.doJSON(ctx, http.MethodPost, "/api/worker/register", c.regToken, body, &resp); err != nil {
-		return 0, fmt.Errorf("register: %w", err)
+	if err := c.doJSON(ctx, http.MethodPost, "/api/worker/register", "", body, &resp); err != nil {
+		return fmt.Errorf("register: %w", err)
+	}
+
+	token, ok := resp["worker_token"].(string)
+	if !ok || token == "" {
+		return fmt.Errorf("register: no worker_token in response")
 	}
 
 	c.mu.Lock()
-	if wid, ok := resp["worker_id"].(string); ok {
-		c.workerID = wid
-	}
-	if wtok, ok := resp["worker_token"].(string); ok && wtok != "" {
-		c.workerToken = wtok
-	} else {
-		c.workerToken = c.regToken
-	}
+	c.workerToken = token
 	c.reRegistered = false
 	c.mu.Unlock()
 
-	interval := 60 * time.Second
-	if hbSec, ok := resp["heartbeat_interval_sec"].(float64); ok && hbSec > 0 {
-		interval = time.Duration(hbSec) * time.Second
-	}
-	c.logger.Info("registered with backend",
-		"worker_id", c.WorkerID(),
-		"has_worker_token", c.workerToken != c.regToken,
-		"heartbeat_sec", int(interval.Seconds()),
-	)
-	return interval, nil
+	c.logger.Info("registered with backend", "token_prefix", token[:8]+"...")
+	return nil
 }
 
-// Claim requests the next task from the backend.
+// Claim requests the next task from the backend. Returns nil if no task available.
 func (c *Client) Claim(ctx context.Context) (*Task, error) {
-	var resp ClaimResponse
-	if err := c.doAuthJSON(ctx, http.MethodPost, "/api/worker/claim", nil, &resp); err != nil {
+	c.mu.Lock()
+	token := c.workerToken
+	c.mu.Unlock()
+
+	var resp map[string]any
+	if err := c.doJSON(ctx, http.MethodPost, "/api/worker/claim", token, nil, &resp); err != nil {
 		return nil, fmt.Errorf("claim: %w", err)
 	}
-	return resp.Task, nil
+
+	// Backend returns null when no task available
+	if resp == nil {
+		return nil, nil
+	}
+
+	taskID, _ := resp["task_id"].(string)
+	magnet, _ := resp["magnet"].(string)
+
+	media, _ := resp["media"].(map[string]any)
+	mediaTitle := ""
+	if media != nil {
+		mediaTitle, _ = media["title"].(string)
+	}
+
+	filePathsRaw, _ := resp["file_paths"].([]any)
+	filePaths := make([]string, 0, len(filePathsRaw))
+	for _, fp := range filePathsRaw {
+		if s, ok := fp.(string); ok {
+			filePaths = append(filePaths, s)
+		}
+	}
+
+	return &Task{
+		TaskID:     taskID,
+		Magnet:     magnet,
+		MediaTitle: mediaTitle,
+		FilePaths:  filePaths,
+	}, nil
 }
 
-// Complete reports task success.
-func (c *Client) Complete(ctx context.Context, taskID string, files []FileInfo, stats TaskStats) error {
+// Manifest sends discovered file list to the backend after torrent metadata is available.
+func (c *Client) Manifest(ctx context.Context, taskID string, files []ManifestFile) ([]UploadSlot, error) {
 	body := map[string]any{
 		"task_id": taskID,
 		"files":   files,
-		"stats":   stats,
+	}
+
+	var resp map[string]any
+	if err := c.doAuthJSON(ctx, http.MethodPost, "/api/worker/manifest", body, &resp); err != nil {
+		return nil, fmt.Errorf("manifest %s: %w", taskID, err)
+	}
+
+	slotsRaw, _ := resp["upload_slots"].([]any)
+	slots := make([]UploadSlot, 0, len(slotsRaw))
+	for _, s := range slotsRaw {
+		sm, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		slot := UploadSlot{
+			Path:  fmt.Sprintf("%v", sm["path"]),
+			S3Key: fmt.Sprintf("%v", sm["s3_key"]),
+			PutURL: fmt.Sprintf("%v", sm["put_url"]),
+		}
+		if hdrs, ok := sm["headers"].(map[string]any); ok {
+			slot.Headers = make(map[string]string)
+			for k, v := range hdrs {
+				slot.Headers[k] = fmt.Sprintf("%v", v)
+			}
+		}
+		slots = append(slots, slot)
+	}
+
+	return slots, nil
+}
+
+// Complete reports task success.
+func (c *Client) Complete(ctx context.Context, taskID string, files []FileInfo) error {
+	body := map[string]any{
+		"task_id": taskID,
+		"files":   files,
 	}
 	if err := c.doAuthJSON(ctx, http.MethodPost, "/api/worker/complete", body, nil); err != nil {
 		return fmt.Errorf("complete %s: %w", taskID, err)
@@ -146,11 +196,10 @@ func (c *Client) Complete(ctx context.Context, taskID string, files []FileInfo, 
 }
 
 // Fail reports task failure.
-func (c *Client) Fail(ctx context.Context, taskID, reason string, permanent bool) error {
+func (c *Client) Fail(ctx context.Context, taskID, reason string) error {
 	body := map[string]any{
-		"task_id":   taskID,
-		"reason":    reason,
-		"permanent": permanent,
+		"task_id": taskID,
+		"error":   reason,
 	}
 	if err := c.doAuthJSON(ctx, http.MethodPost, "/api/worker/fail", body, nil); err != nil {
 		return fmt.Errorf("fail %s: %w", taskID, err)
@@ -158,11 +207,13 @@ func (c *Client) Fail(ctx context.Context, taskID, reason string, permanent bool
 	return nil
 }
 
-// Heartbeat sends progress for all active tasks.
-func (c *Client) Heartbeat(ctx context.Context, tasks []HeartbeatTask, diskFreeGB float64) error {
-	body := HeartbeatRequest{
-		Tasks:      tasks,
-		DiskFreeGB: diskFreeGB,
+// Heartbeat sends progress for a single task.
+func (c *Client) Heartbeat(ctx context.Context, task HeartbeatTask) error {
+	body := map[string]any{
+		"task_id":      task.TaskID,
+		"stage":        task.Stage,
+		"progress_pct": task.ProgressPct,
+		"speed_bps":    task.SpeedBps,
 	}
 	if err := c.doAuthJSON(ctx, http.MethodPost, "/api/worker/heartbeat", body, nil); err != nil {
 		return fmt.Errorf("heartbeat: %w", err)
@@ -195,8 +246,21 @@ func (c *Client) doJSON(ctx context.Context, method, path, token string, body an
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 204 {
+		return nil
+	}
+
 	if resp.StatusCode == 401 {
-		return c.handle401()
+		c.mu.Lock()
+		if c.reRegistered {
+			c.mu.Unlock()
+			return fmt.Errorf("401 after re-register, backing off")
+		}
+		c.logger.Warn("received 401, clearing token for re-registration")
+		c.workerToken = ""
+		c.reRegistered = true
+		c.mu.Unlock()
+		return fmt.Errorf("401: need re-registration")
 	}
 	if resp.StatusCode >= 500 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -225,31 +289,9 @@ func (c *Client) doAuthJSON(ctx context.Context, method, path string, body any, 
 	return c.doJSON(ctx, method, path, token, body, result)
 }
 
-func (c *Client) handle401() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.reRegistered {
-		return fmt.Errorf("401 after re-register, backing off")
-	}
-
-	c.logger.Warn("received 401, clearing token for re-registration")
-	c.workerToken = ""
-	c.reRegistered = true
-
-	return fmt.Errorf("401: need re-registration")
-}
-
 // ClearReRegistrationFlag resets the 401 re-registration flag.
 func (c *Client) ClearReRegistrationFlag() {
 	c.mu.Lock()
 	c.reRegistered = false
 	c.mu.Unlock()
-}
-
-// IsRegistered returns true if the client has a valid worker token.
-func (c *Client) IsRegistered() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.workerToken != ""
 }

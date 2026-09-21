@@ -10,7 +10,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
 func testLogger() *slog.Logger {
@@ -20,7 +19,7 @@ func testLogger() *slog.Logger {
 func newTestClient(t *testing.T, handler http.Handler) (*Client, *httptest.Server) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
-	c := New(srv.URL, "reg-token", testLogger())
+	c := New(srv.URL, "test-secret", testLogger())
 	t.Cleanup(srv.Close)
 	return c, srv
 }
@@ -36,78 +35,64 @@ func assertWorkerToken(t *testing.T, r *http.Request, expected string) {
 func TestRegister_HappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
-		assertWorkerToken(t, r, "reg-token")
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
-		if body["hostname"] != "test-host" {
-			t.Errorf("expected hostname test-host, got %v", body["hostname"])
+		if body["name"] != "test-host" {
+			t.Errorf("expected name test-host, got %v", body["name"])
+		}
+		if body["reg_secret"] != "test-secret" {
+			t.Errorf("expected reg_secret test-secret, got %v", body["reg_secret"])
 		}
 		respondJSON(w, map[string]any{
-			"worker_id":              "w_abc",
-			"worker_token":           "jwt-token-123",
-			"heartbeat_interval_sec": 30,
+			"worker_token": "abc123def456",
 		})
 	})
 
 	c, _ := newTestClient(t, mux)
-	interval, err := c.Register(context.Background(), "test-host", "0.1.0", 1, 100.0)
+	err := c.Register(context.Background(), "test-host")
 	if err != nil {
 		t.Fatalf("register: %v", err)
-	}
-	if c.WorkerID() != "w_abc" {
-		t.Errorf("expected worker_id w_abc, got %s", c.WorkerID())
-	}
-	if interval != 30*time.Second {
-		t.Errorf("expected 30s interval, got %v", interval)
 	}
 	if !c.IsRegistered() {
 		t.Error("expected client to be registered")
 	}
 }
 
-func TestRegister_EmptyResponse_UsesRegToken(t *testing.T) {
+func TestRegister_BadSecret_401(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
-		respondJSON(w, map[string]any{})
+		w.WriteHeader(401)
+		w.Write([]byte(`{"detail":"Invalid registration secret"}`))
 	})
 
 	c, _ := newTestClient(t, mux)
-	interval, err := c.Register(context.Background(), "h", "v", 1, 100)
-	if err != nil {
-		t.Fatalf("register: %v", err)
+	err := c.Register(context.Background(), "test-host")
+	if err == nil {
+		t.Fatal("expected error for 401")
 	}
-	if interval != 60*time.Second {
-		t.Errorf("expected default 60s interval, got %v", interval)
-	}
-	if !c.IsRegistered() {
-		t.Error("expected client to be registered (using regToken fallback)")
+	if !strings.Contains(err.Error(), "401") {
+		t.Errorf("expected 401 in error, got: %v", err)
 	}
 }
 
 func TestClaim_HappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
-		respondJSON(w, map[string]any{
-			"worker_token": "jwt-token",
-		})
+		respondJSON(w, map[string]any{"worker_token": "worker-tok"})
 	})
 	mux.HandleFunc("POST /api/worker/claim", func(w http.ResponseWriter, r *http.Request) {
-		assertWorkerToken(t, r, "jwt-token")
+		assertWorkerToken(t, r, "worker-tok")
 		respondJSON(w, map[string]any{
-			"task": map[string]any{
-				"task_id":       "tsk_001",
-				"torrent_kind":  "magnet",
-				"torrent_data":  "magnet:?xt=urn:btih:abc",
-				"select_files":  nil,
-				"dest_prefix":   "media/users/u1/md1/",
-				"max_bytes":     1024,
-				"lease_minutes": 10,
-			},
+			"task_id":       "tsk_001",
+			"magnet":        "magnet:?xt=urn:btih:abc",
+			"media":         map[string]any{"title": "Test Movie"},
+			"file_paths":    []string{"movie.mkv"},
+			"lease_minutes": 10,
 		})
 	})
 
 	c, _ := newTestClient(t, mux)
-	c.Register(context.Background(), "h", "v", 1, 100)
+	c.Register(context.Background(), "h")
 
 	task, err := c.Claim(context.Background())
 	if err != nil {
@@ -119,24 +104,25 @@ func TestClaim_HappyPath(t *testing.T) {
 	if task.TaskID != "tsk_001" {
 		t.Errorf("expected tsk_001, got %s", task.TaskID)
 	}
-	if task.TorrentKind != "magnet" {
-		t.Errorf("expected magnet, got %s", task.TorrentKind)
+	if task.Magnet != "magnet:?xt=urn:btih:abc" {
+		t.Errorf("expected magnet, got %s", task.Magnet)
+	}
+	if task.MediaTitle != "Test Movie" {
+		t.Errorf("expected Test Movie, got %s", task.MediaTitle)
 	}
 }
 
 func TestClaim_NoTask(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
-		respondJSON(w, map[string]any{
-			"worker_token": "jwt-token",
-		})
+		respondJSON(w, map[string]any{"worker_token": "worker-tok"})
 	})
 	mux.HandleFunc("POST /api/worker/claim", func(w http.ResponseWriter, r *http.Request) {
-		respondJSON(w, map[string]any{"task": nil})
+		w.WriteHeader(204)
 	})
 
 	c, _ := newTestClient(t, mux)
-	c.Register(context.Background(), "h", "v", 1, 100)
+	c.Register(context.Background(), "h")
 
 	task, err := c.Claim(context.Background())
 	if err != nil {
@@ -147,32 +133,64 @@ func TestClaim_NoTask(t *testing.T) {
 	}
 }
 
+func TestManifest_HappyPath(t *testing.T) {
+	var receivedBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
+		respondJSON(w, map[string]any{"worker_token": "worker-tok"})
+	})
+	mux.HandleFunc("POST /api/worker/manifest", func(w http.ResponseWriter, r *http.Request) {
+		assertWorkerToken(t, r, "worker-tok")
+		data, _ := io.ReadAll(r.Body)
+		json.Unmarshal(data, &receivedBody)
+		respondJSON(w, map[string]any{
+			"task_id": "tsk_001",
+			"upload_slots": []map[string]any{
+				{"path": "movie.mkv", "s3_key": "users/u1/movie.mkv", "put_url": "https://s3.example.com/presigned"},
+			},
+		})
+	})
+
+	c, _ := newTestClient(t, mux)
+	c.Register(context.Background(), "h")
+
+	slots, err := c.Manifest(context.Background(), "tsk_001", []ManifestFile{
+		{Path: "movie.mkv", SizeBytes: 1024},
+	})
+	if err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	if receivedBody["task_id"] != "tsk_001" {
+		t.Errorf("expected task_id=tsk_001, got %v", receivedBody["task_id"])
+	}
+	if len(slots) != 1 {
+		t.Fatalf("expected 1 slot, got %d", len(slots))
+	}
+	if slots[0].S3Key != "users/u1/movie.mkv" {
+		t.Errorf("expected s3_key users/u1/movie.mkv, got %s", slots[0].S3Key)
+	}
+}
+
 func TestComplete_HappyPath(t *testing.T) {
 	var receivedBody map[string]any
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
-		respondJSON(w, map[string]any{
-			"worker_token": "jwt-token",
-		})
+		respondJSON(w, map[string]any{"worker_token": "worker-tok"})
 	})
 	mux.HandleFunc("POST /api/worker/complete", func(w http.ResponseWriter, r *http.Request) {
-		assertWorkerToken(t, r, "jwt-token")
+		assertWorkerToken(t, r, "worker-tok")
 		data, _ := io.ReadAll(r.Body)
 		json.Unmarshal(data, &receivedBody)
-		respondJSON(w, map[string]any{})
+		respondJSON(w, map[string]any{"ok": true})
 	})
 
 	c, _ := newTestClient(t, mux)
-	c.Register(context.Background(), "h", "v", 1, 100)
+	c.Register(context.Background(), "h")
 
-	files := []FileInfo{{S3Key: "media/users/u1/md1/movie.mkv", Size: 1024}}
-	stats := TaskStats{DownloadSeconds: 60, UploadSeconds: 30}
-	err := c.Complete(context.Background(), "tsk_001", files, stats)
+	files := []FileInfo{{Path: "movie.mkv", SizeBytes: 1024}}
+	err := c.Complete(context.Background(), "tsk_001", files)
 	if err != nil {
 		t.Fatalf("complete: %v", err)
-	}
-	if receivedBody == nil {
-		t.Fatal("expected body to be received")
 	}
 	if receivedBody["task_id"] != "tsk_001" {
 		t.Errorf("expected task_id=tsk_001, got %v", receivedBody["task_id"])
@@ -183,73 +201,63 @@ func TestFail_HappyPath(t *testing.T) {
 	var receivedBody map[string]any
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
-		respondJSON(w, map[string]any{
-			"worker_token": "jwt-token",
-		})
+		respondJSON(w, map[string]any{"worker_token": "worker-tok"})
 	})
 	mux.HandleFunc("POST /api/worker/fail", func(w http.ResponseWriter, r *http.Request) {
-		assertWorkerToken(t, r, "jwt-token")
+		assertWorkerToken(t, r, "worker-tok")
 		data, _ := io.ReadAll(r.Body)
 		json.Unmarshal(data, &receivedBody)
-		respondJSON(w, map[string]any{})
+		respondJSON(w, map[string]any{"ok": true})
 	})
 
 	c, _ := newTestClient(t, mux)
-	c.Register(context.Background(), "h", "v", 1, 100)
+	c.Register(context.Background(), "h")
 
-	err := c.Fail(context.Background(), "tsk_001", "stalled", true)
+	err := c.Fail(context.Background(), "tsk_001", "stalled")
 	if err != nil {
 		t.Fatalf("fail: %v", err)
 	}
 	if receivedBody["task_id"] != "tsk_001" {
 		t.Errorf("expected task_id=tsk_001, got %v", receivedBody["task_id"])
 	}
-	if receivedBody["permanent"] != true {
-		t.Errorf("expected permanent=true, got %v", receivedBody["permanent"])
-	}
-	if receivedBody["reason"] != "stalled" {
-		t.Errorf("expected reason=stalled, got %v", receivedBody["reason"])
+	if receivedBody["error"] != "stalled" {
+		t.Errorf("expected error=stalled, got %v", receivedBody["error"])
 	}
 }
 
 func TestHeartbeat_HappyPath(t *testing.T) {
+	var receivedBody map[string]any
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
-		respondJSON(w, map[string]any{
-			"worker_token": "jwt-token",
-		})
+		respondJSON(w, map[string]any{"worker_token": "worker-tok"})
 	})
 	mux.HandleFunc("POST /api/worker/heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		assertWorkerToken(t, r, "jwt-token")
-		var body HeartbeatRequest
-		json.NewDecoder(r.Body).Decode(&body)
-		if len(body.Tasks) != 1 {
-			t.Errorf("expected 1 task, got %d", len(body.Tasks))
-		}
-		if body.Tasks[0].TaskID != "tsk_001" {
-			t.Errorf("expected tsk_001, got %s", body.Tasks[0].TaskID)
-		}
-		respondJSON(w, map[string]any{})
+		assertWorkerToken(t, r, "worker-tok")
+		data, _ := io.ReadAll(r.Body)
+		json.Unmarshal(data, &receivedBody)
+		respondJSON(w, map[string]any{"ok": true})
 	})
 
 	c, _ := newTestClient(t, mux)
-	c.Register(context.Background(), "h", "v", 1, 100)
+	c.Register(context.Background(), "h")
 
-	tasks := []HeartbeatTask{
-		{TaskID: "tsk_001", Stage: "downloading", ProgressPct: 50.0, SpeedMbps: 1.5},
-	}
-	err := c.Heartbeat(context.Background(), tasks, 100.0)
+	hb := HeartbeatTask{TaskID: "tsk_001", Stage: "downloading", ProgressPct: 50.0, SpeedBps: 1572864}
+	err := c.Heartbeat(context.Background(), hb)
 	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
+	if receivedBody["task_id"] != "tsk_001" {
+		t.Errorf("expected task_id=tsk_001, got %v", receivedBody["task_id"])
+	}
+	if receivedBody["stage"] != "downloading" {
+		t.Errorf("expected stage=downloading, got %v", receivedBody["stage"])
+	}
 }
 
-func Test401_TriggersReRegistrationFlag(t *testing.T) {
+func Test401_ClearsToken(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/worker/register", func(w http.ResponseWriter, r *http.Request) {
-		respondJSON(w, map[string]any{
-			"worker_token": "jwt-token",
-		})
+		respondJSON(w, map[string]any{"worker_token": "worker-tok"})
 	})
 	mux.HandleFunc("POST /api/worker/claim", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
@@ -257,7 +265,7 @@ func Test401_TriggersReRegistrationFlag(t *testing.T) {
 	})
 
 	c, _ := newTestClient(t, mux)
-	c.Register(context.Background(), "h", "v", 1, 100)
+	c.Register(context.Background(), "h")
 
 	_, err := c.Claim(context.Background())
 	if err == nil {

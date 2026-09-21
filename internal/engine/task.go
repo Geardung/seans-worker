@@ -17,7 +17,6 @@ import (
 	"github.com/Geardung/seans-worker/internal/s3uploader"
 )
 
-// Stage represents the current processing stage of a task.
 type Stage string
 
 const (
@@ -27,7 +26,6 @@ const (
 	StageDone        Stage = "done"
 )
 
-// TaskState holds all runtime state for a single task.
 type TaskState struct {
 	TaskID       string
 	Stage        Stage
@@ -54,19 +52,15 @@ type taskRunner struct {
 	logger   *slog.Logger
 }
 
-func newTaskRunner(cfg *config.Config, bc *backend.Client, qc *qbit.Client, up *s3uploader.Uploader, task *backend.Task, logger *slog.Logger) *taskRunner {
+func newTaskRunner(cfg *config.Config, bc *backend.Client, qc *qbit.Client, up *s3uploader.Uploader, task *backend.Task, state *TaskState, logger *slog.Logger) *taskRunner {
 	return &taskRunner{
 		cfg:      cfg,
 		bc:       bc,
 		qc:       qc,
 		uploader: up,
 		task:     task,
-		state: &TaskState{
-			TaskID:    task.TaskID,
-			Stage:     StagePreparing,
-			StartedAt: time.Now(),
-		},
-		logger: logger.With("task_id", task.TaskID),
+		state:    state,
+		logger:   logger.With("task_id", task.TaskID),
 	}
 }
 
@@ -109,14 +103,8 @@ func (tr *taskRunner) prepare(ctx context.Context) error {
 		}
 	}
 
-	if tr.task.TorrentKind == "file_b64" {
-		if err := tr.qc.AddTorrentFile(ctx, tr.task.TorrentData, savePath, "seans"); err != nil {
-			return fmt.Errorf("add torrent file: %w", err)
-		}
-	} else {
-		if err := tr.qc.AddTorrentMagnet(ctx, tr.task.TorrentData, savePath, "seans"); err != nil {
-			return fmt.Errorf("add magnet: %w", err)
-		}
+	if err := tr.qc.AddTorrentMagnet(ctx, tr.task.Magnet, savePath, "seans"); err != nil {
+		return fmt.Errorf("add magnet: %w", err)
 	}
 
 	torrent, err := tr.waitForTorrent(ctx, savePath)
@@ -125,7 +113,7 @@ func (tr *taskRunner) prepare(ctx context.Context) error {
 	}
 	tr.state.TorrentHash = torrent.Hash
 
-	if tr.task.TorrentKind == "magnet" && torrent.State == "metaDL" {
+	if torrent.State == "metaDL" {
 		tr.logger.Info("waiting for torrent metadata", "timeout", tr.cfg.TorrentMetadataTimeout)
 		if err := tr.waitForMetadata(ctx, torrent.Hash); err != nil {
 			return err
@@ -138,8 +126,18 @@ func (tr *taskRunner) prepare(ctx context.Context) error {
 	}
 	tr.state.Files = files
 
-	if err := tr.checkSizeAndPrioritize(ctx, torrent.Hash, files); err != nil {
-		return err
+	// Send manifest to backend and get upload slots
+	manifestFiles := make([]backend.ManifestFile, 0, len(files))
+	for _, f := range files {
+		manifestFiles = append(manifestFiles, backend.ManifestFile{
+			Path:      f.Name,
+			SizeBytes: f.Size,
+		})
+	}
+
+	_, err = tr.bc.Manifest(ctx, tr.task.TaskID, manifestFiles)
+	if err != nil {
+		return fmt.Errorf("send manifest: %w", err)
 	}
 
 	tr.logger.Info("preparing complete", "files", len(files))
@@ -190,118 +188,6 @@ func (tr *taskRunner) waitForMetadata(ctx context.Context, hash string) error {
 			}
 		}
 	}
-}
-
-func (tr *taskRunner) checkSizeAndPrioritize(ctx context.Context, hash string, files []qbit.TorrentFile) error {
-	selectFiles := tr.task.SelectFiles
-
-	if selectFiles == nil {
-		var totalSize int64
-		for _, f := range files {
-			totalSize += f.Size
-		}
-		if totalSize > tr.task.MaxBytes {
-			return &TaskError{
-				Reason:    fmt.Sprintf("quota exceeded: %d bytes > %d limit", totalSize, tr.task.MaxBytes),
-				Permanent: true,
-			}
-		}
-		return nil
-	}
-
-	matchedIndices := tr.matchFiles(files, selectFiles)
-	if len(matchedIndices) == 0 {
-		return &TaskError{
-			Reason:    "no matching files found for select_files",
-			Permanent: true,
-		}
-	}
-
-	var selectedSize int64
-	matchedSet := make(map[int]bool)
-	for _, idx := range matchedIndices {
-		matchedSet[idx] = true
-		for _, f := range files {
-			if f.Index == idx {
-				selectedSize += f.Size
-				break
-			}
-		}
-	}
-
-	if selectedSize > tr.task.MaxBytes {
-		return &TaskError{
-			Reason:    fmt.Sprintf("quota exceeded: selected files %d bytes > %d limit", selectedSize, tr.task.MaxBytes),
-			Permanent: true,
-		}
-	}
-
-	unmatchedIndices := make([]int, 0)
-	for _, f := range files {
-		if !matchedSet[f.Index] {
-			unmatchedIndices = append(unmatchedIndices, f.Index)
-		}
-	}
-
-	if len(unmatchedIndices) > 0 {
-		if err := tr.qc.SetFilePriority(ctx, hash, unmatchedIndices, 0); err != nil {
-			tr.logger.Warn("failed to set skip priority", "error", err)
-		}
-	}
-	if len(matchedIndices) > 0 {
-		if err := tr.qc.SetFilePriority(ctx, hash, matchedIndices, 1); err != nil {
-			tr.logger.Warn("failed to set normal priority", "error", err)
-		}
-	}
-
-	tr.logger.Info("file selection applied",
-		"selected", len(matchedIndices),
-		"skipped", len(unmatchedIndices),
-		"selected_bytes", selectedSize,
-	)
-	return nil
-}
-
-func (tr *taskRunner) matchFiles(files []qbit.TorrentFile, selectFiles []string) []int {
-	matched := make([]int, 0)
-	matchedNames := make(map[string]bool)
-
-	// Exact match
-	for _, sel := range selectFiles {
-		for _, f := range files {
-			if f.Name == sel && !matchedNames[f.Name] {
-				matched = append(matched, f.Index)
-				matchedNames[f.Name] = true
-			}
-		}
-	}
-
-	// Suffix match fallback
-	for _, sel := range selectFiles {
-		alreadyMatched := false
-		for _, f := range files {
-			if f.Name == sel {
-				alreadyMatched = true
-				break
-			}
-		}
-		if alreadyMatched {
-			continue
-		}
-		selBase := filepath.Base(sel)
-		for _, f := range files {
-			if matchedNames[f.Name] {
-				continue
-			}
-			if filepath.Base(f.Name) == selBase {
-				matched = append(matched, f.Index)
-				matchedNames[f.Name] = true
-				tr.logger.Info("suffix match fallback", "select_file", sel, "matched_to", f.Name)
-			}
-		}
-	}
-
-	return matched
 }
 
 func (tr *taskRunner) download(ctx context.Context) error {
@@ -377,7 +263,7 @@ func (tr *taskRunner) upload(ctx context.Context) error {
 	stagingPath := filepath.Join(tr.cfg.StagingDir, tr.task.TaskID)
 	logFile := filepath.Join(tr.cfg.StateDir, "rclone.log")
 
-	if err := tr.uploader.Move(ctx, stagingPath, tr.task.DestPrefix, 3, logFile); err != nil {
+	if err := tr.uploader.Move(ctx, stagingPath, "users/"+tr.task.TaskID+"/", 3, logFile); err != nil {
 		return &TaskError{Reason: fmt.Sprintf("upload failed: %v", err), Permanent: false}
 	}
 
@@ -398,20 +284,15 @@ func (tr *taskRunner) upload(ctx context.Context) error {
 func (tr *taskRunner) complete(ctx context.Context) {
 	files := make([]backend.FileInfo, 0)
 	for _, f := range tr.state.Files {
-		if tr.isSelected(f) {
+		if f.Priority > 0 {
 			files = append(files, backend.FileInfo{
-				S3Key: tr.task.DestPrefix + relativePath(f.Name),
-				Size:  f.Size,
+				Path:      f.Name,
+				SizeBytes: f.Size,
 			})
 		}
 	}
 
-	stats := backend.TaskStats{
-		DownloadSeconds: tr.state.DownloadSeconds,
-		UploadSeconds:   tr.state.UploadSeconds,
-	}
-
-	if err := tr.bc.Complete(ctx, tr.task.TaskID, files, stats); err != nil {
+	if err := tr.bc.Complete(ctx, tr.task.TaskID, files); err != nil {
 		tr.logger.Error("failed to report completion", "error", err)
 		return
 	}
@@ -428,36 +309,17 @@ func (tr *taskRunner) complete(ctx context.Context) {
 func (tr *taskRunner) failTask(ctx context.Context, err error) {
 	var taskErr *TaskError
 	reason := err.Error()
-	permanent := false
 
 	if errors.As(err, &taskErr) {
 		reason = taskErr.Reason
-		permanent = taskErr.Permanent
 	}
 
-	tr.logger.Error("task failed", "reason", reason, "permanent", permanent)
-	if reportErr := tr.bc.Fail(ctx, tr.task.TaskID, reason, permanent); reportErr != nil {
+	tr.logger.Error("task failed", "reason", reason)
+	if reportErr := tr.bc.Fail(ctx, tr.task.TaskID, reason); reportErr != nil {
 		tr.logger.Error("failed to report failure", "error", reportErr)
 	}
 }
 
-func (tr *taskRunner) isSelected(f qbit.TorrentFile) bool {
-	if tr.task.SelectFiles == nil {
-		return f.Priority > 0
-	}
-	for _, sel := range tr.task.SelectFiles {
-		if f.Name == sel || filepath.Base(f.Name) == filepath.Base(sel) {
-			return true
-		}
-	}
-	return false
-}
-
-func relativePath(name string) string {
-	return strings.TrimPrefix(name, "/")
-}
-
-// TaskError represents a task failure with permanence flag.
 type TaskError struct {
 	Reason    string
 	Permanent bool
@@ -465,4 +327,8 @@ type TaskError struct {
 
 func (e *TaskError) Error() string {
 	return e.Reason
+}
+
+func relativePath(name string) string {
+	return strings.TrimPrefix(name, "/")
 }

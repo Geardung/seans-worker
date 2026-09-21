@@ -14,7 +14,6 @@ import (
 	"github.com/Geardung/seans-worker/internal/engine"
 	"github.com/Geardung/seans-worker/internal/qbit"
 	"github.com/Geardung/seans-worker/internal/s3uploader"
-	"github.com/Geardung/seans-worker/internal/sysutil"
 )
 
 var version = "dev"
@@ -47,20 +46,16 @@ func main() {
 	}
 
 	// Init backend client
-	bc := backend.New(cfg.BackendURL, cfg.WorkerRegisterToken, logger)
+	bc := backend.New(cfg.BackendURL, cfg.RegSecret, logger)
 
 	// Register with backend (retry loop)
-	diskFree, _ := sysutil.DiskFreeGB(cfg.StagingDir)
-	heartbeatInterval := cfg.HeartbeatInterval
-
 	for {
-		interval, err := bc.Register(ctx, cfg.WorkerName, version, cfg.MaxConcurrentTasks, diskFree)
+		err := bc.Register(ctx, cfg.WorkerName)
 		if err != nil {
 			logger.Error("registration failed, retrying in 10s", "error", err)
 			time.Sleep(10 * time.Second)
 			continue
 		}
-		heartbeatInterval = interval
 		break
 	}
 
@@ -80,8 +75,7 @@ func main() {
 	}()
 
 	logger.Info("worker ready",
-		"worker_id", bc.WorkerID(),
-		"heartbeat_sec", int(heartbeatInterval.Seconds()),
+		"heartbeat_sec", int(cfg.HeartbeatInterval.Seconds()),
 		"staging_dir", cfg.StagingDir,
 		"mock_s3", cfg.MockS3,
 	)

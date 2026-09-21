@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -11,7 +10,6 @@ import (
 	"github.com/Geardung/seans-worker/internal/config"
 	"github.com/Geardung/seans-worker/internal/qbit"
 	"github.com/Geardung/seans-worker/internal/s3uploader"
-	"github.com/Geardung/seans-worker/internal/sysutil"
 )
 
 // Engine is the main worker loop.
@@ -40,12 +38,10 @@ func New(cfg *config.Config, bc *backend.Client, qc *qbit.Client, uploader *s3up
 
 // Run starts the worker loop. Blocks until ctx is cancelled.
 func (e *Engine) Run(ctx context.Context) {
-	// Start heartbeat goroutine
 	heartbeatCtx, heartbeatCancel := context.WithCancel(ctx)
 	defer heartbeatCancel()
 	go e.heartbeatLoop(heartbeatCtx)
 
-	// Claim loop
 	claimCtx, claimCancel := context.WithCancel(ctx)
 	e.mu.Lock()
 	e.claimCancel = claimCancel
@@ -70,7 +66,6 @@ func (e *Engine) Run(ctx context.Context) {
 func (e *Engine) Shutdown(ctx context.Context) {
 	e.logger.Info("shutdown initiated", "drain", e.cfg.DrainOnShutdown)
 
-	// Stop claiming
 	e.mu.Lock()
 	if e.claimCancel != nil {
 		e.claimCancel()
@@ -86,8 +81,7 @@ func (e *Engine) Shutdown(ctx context.Context) {
 		e.failAllActive(ctx, "worker shutting down")
 	}
 
-	// Final heartbeat
-	e.sendHeartbeat(ctx)
+	e.sendHeartbeats(ctx)
 	e.logger.Info("shutdown complete")
 }
 
@@ -110,7 +104,7 @@ func (e *Engine) tryClaim(ctx context.Context) {
 		return
 	}
 
-	e.logger.Info("claimed task", "task_id", task.TaskID, "torrent_kind", task.TorrentKind)
+	e.logger.Info("claimed task", "task_id", task.TaskID, "title", task.MediaTitle)
 
 	state := &TaskState{
 		TaskID:    task.TaskID,
@@ -123,7 +117,7 @@ func (e *Engine) tryClaim(ctx context.Context) {
 	e.mu.Unlock()
 
 	go func() {
-		runner := newTaskRunner(e.cfg, e.bc, e.qc, e.uploader, task, e.logger)
+		runner := newTaskRunner(e.cfg, e.bc, e.qc, e.uploader, task, state, e.logger)
 		runner.run(ctx)
 
 		e.mu.Lock()
@@ -133,7 +127,6 @@ func (e *Engine) tryClaim(ctx context.Context) {
 }
 
 func (e *Engine) heartbeatLoop(ctx context.Context) {
-	// Use register-returned interval or default
 	interval := e.cfg.HeartbeatInterval
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -145,7 +138,7 @@ func (e *Engine) heartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := e.sendHeartbeat(ctx); err != nil {
+			if err := e.sendHeartbeats(ctx); err != nil {
 				consecutiveErrors++
 				if consecutiveErrors >= 3 {
 					e.logger.Error("heartbeat failed 3 consecutive times", "error", err)
@@ -159,32 +152,31 @@ func (e *Engine) heartbeatLoop(ctx context.Context) {
 	}
 }
 
-func (e *Engine) sendHeartbeat(ctx context.Context) error {
+func (e *Engine) sendHeartbeats(ctx context.Context) error {
 	e.mu.Lock()
-	tasks := make([]backend.HeartbeatTask, 0, len(e.activeTasks))
-	for _, s := range e.activeTasks {
-		tasks = append(tasks, backend.HeartbeatTask{
-			TaskID:      s.TaskID,
-			Stage:       string(s.Stage),
-			ProgressPct: s.ProgressPct,
-			SpeedMbps:   s.SpeedMbps,
-			ETAMin:      s.ETAMin,
-			Message:     s.Message,
-		})
+	snapshot := make(map[string]*TaskState, len(e.activeTasks))
+	for k, v := range e.activeTasks {
+		snapshot[k] = v
 	}
 	e.mu.Unlock()
 
-	diskFree, err := sysutil.DiskFreeGB(e.cfg.StagingDir)
-	if err != nil {
-		e.logger.Warn("failed to get disk free", "error", err)
-		diskFree = 0
+	if len(snapshot) == 0 {
+		return nil
 	}
 
-	if err := e.bc.Heartbeat(ctx, tasks, diskFree); err != nil {
-		return fmt.Errorf("heartbeat: %w", err)
+	for _, s := range snapshot {
+		hb := backend.HeartbeatTask{
+			TaskID:      s.TaskID,
+			Stage:       string(s.Stage),
+			ProgressPct: s.ProgressPct,
+			SpeedBps:    int64(s.SpeedMbps * 1024 * 1024),
+		}
+		if err := e.bc.Heartbeat(ctx, hb); err != nil {
+			e.logger.Warn("heartbeat failed for task", "task_id", s.TaskID, "error", err)
+		}
 	}
 
-	e.logger.Debug("heartbeat sent", "tasks", len(tasks), "disk_free_gb", fmt.Sprintf("%.1f", diskFree))
+	e.logger.Debug("heartbeats sent", "tasks", len(snapshot))
 	return nil
 }
 
@@ -217,12 +209,11 @@ func (e *Engine) failAllActive(ctx context.Context, reason string) {
 	e.mu.Unlock()
 
 	for _, id := range ids {
-		if err := e.bc.Fail(ctx, id, reason, false); err != nil {
+		if err := e.bc.Fail(ctx, id, reason); err != nil {
 			e.logger.Error("failed to report failure during shutdown", "task_id", id, "error", err)
 		}
 	}
 
-	// Pause qBittorrent torrents
 	hashes := ""
 	e.mu.Lock()
 	for _, s := range e.activeTasks {
@@ -242,7 +233,6 @@ func (e *Engine) failAllActive(ctx context.Context, reason string) {
 	}
 }
 
-// ActiveTasks returns the current active task states (for external monitoring).
 func (e *Engine) ActiveTasks() []TaskState {
 	e.mu.Lock()
 	defer e.mu.Unlock()
